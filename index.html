@@ -462,7 +462,7 @@ C.assets = {
   upload: async blob => {
     const ext = ((blob.type || "").split("/")[1] || "mp4").replace(/[^a-z0-9]/gi, "").slice(0, 5) || "mp4";
     const path = `${APP()}/${Date.now()}-${uid()}.${ext}`;
-    const {error} = await sb.storage.from(MEDIA).upload(path, blob, {contentType: blob.type || "video/mp4", upsert: false});
+    const {error} = await sb.storage.from(MEDIA).upload(path, blob, {contentType: blob.type || "video/mp4", upsert: false, cacheControl: "31536000"});
     if (error) throw Object.assign(new Error(error.message), {code: /size|large/i.test(error.message) ? "too_large" : "upload_failed"});
     return {id: path};
   },
@@ -568,6 +568,17 @@ document.addEventListener("change", async e => {
   if (e.target.id !== "labImport" || !e.target.files.length || !C.coach) return;
   const msg = $("#labImportMsg"), files = [...e.target.files], f = files.find(x => /\.json$/i.test(x.name));
   try {
+    const vidsOnly = files.filter(x => /\.(mp4|mov|webm|m4v)$/i.test(x.name));
+    if (!f && vidsOnly.length) {
+      /* videos only: replace the clips the earlier import put in Storage (same names), nothing else changes */
+      let v = 0;
+      for (const vf of vidsOnly) {
+        msg.textContent = `Replacing video ${++v} of ${vidsOnly.length}…`;
+        const {error} = await sb.storage.from(MEDIA).upload(`${APP()}/legacy/${vf.name}`, vf, {contentType: vf.type || "video/mp4", upsert: true, cacheControl: "31536000"});
+        if (error) throw new Error("Video " + vf.name + ": " + error.message);
+      }
+      msg.textContent = `Done: ${vidsOnly.length} videos replaced. Nothing else was changed.`; e.target.value = ""; return;
+    }
     if (!f) throw new Error("Include the " + window.LAB.app + "-lab-data.json file.");
     const j = JSON.parse(await f.text());
     if (j.app !== window.LAB.app || !Array.isArray(j.docs)) throw new Error(`That file is for the ${j.app || "wrong"} app.`);
@@ -578,7 +589,7 @@ document.addEventListener("change", async e => {
     for (const vf of vids) {
       const id = vf.name.replace(/\.[^.]+$/, ""), path = `${j.app}/legacy/${vf.name}`;
       msg.textContent = `Uploading video ${++v} of ${vids.length}…`;
-      const {error} = await sb.storage.from(MEDIA).upload(path, vf, {contentType: vf.type || "video/mp4", upsert: true});
+      const {error} = await sb.storage.from(MEDIA).upload(path, vf, {contentType: vf.type || "video/mp4", upsert: true, cacheControl: "31536000"});
       if (error) throw new Error("Video " + vf.name + ": " + error.message);
       have[id] = path;
     }
@@ -598,6 +609,21 @@ document.addEventListener("change", async e => {
   } catch (err) { console.error(err); msg.textContent = "Import stopped: " + (err.message || err); }
   e.target.value = "";
 });
+
+/* coach-only: open the import box any time at <site>/#import (it floats above the app so live updates don't wipe it) */
+function importBox(){
+  const open = location.hash === "#import" && C.coach;
+  let box = document.getElementById("labImportBox");
+  if (!open) { if (box) box.remove(); return; }
+  if (box) return;
+  box = document.createElement("div"); box.id = "labImportBox";
+  box.style.cssText = "position:fixed;inset:0;z-index:50;background:rgba(13,35,63,.55);display:grid;place-items:center;padding:16px;overflow:auto";
+  box.innerHTML = `<div style="max-width:620px;width:100%">${C.importHtml()}<p style="text-align:center"><button class="btn" id="labImportClose">Close</button></p></div>`;
+  document.body.appendChild(box);
+  box.querySelector("#labImportClose").onclick = () => { history.replaceState(null, "", location.pathname); box.remove(); window.render && window.render(); };
+}
+addEventListener("hashchange", importBox);
+C.importBox = importBox;
 
 /* ---------- sign-in screens ---------- */
 function authCard(inner) {
@@ -672,7 +698,7 @@ async function startSession(session) {
   C.ready = true;
   startLive(); watchReports();
   window.LAB.start(C.db, C.userApi, C.assets);
-  refreshBadge();
+  refreshBadge(); importBox();
 }
 C.boot = async function () {
   if (RECOVERY) C.authView = "reset";
@@ -1349,7 +1375,7 @@ function demoSource(u){
 }
 function demoHtml(d){
   let h = "";
-  if (d.videoAsset) h += `<video class="demo" controls playsinline preload="metadata" src="${esc(CORE.mediaUrl(d.videoAsset))}" data-haslink="${d.video ? 1 : 0}"></video>`;
+  if (d.videoAsset) h += `<video class="demo" controls playsinline preload="none" src="${esc(CORE.mediaUrl(d.videoAsset))}" data-haslink="${d.video ? 1 : 0}"></video>`;
   if (d.video) { const src = demoSource(d.video); h += `<p><a class="btn ghost sm demo-link" href="${esc(d.video)}" target="_blank" rel="noopener">▶ Watch the demo${src ? ` on ${src}` : ""}</a></p>`; }
   return h;
 }
@@ -2490,7 +2516,7 @@ function playerMech(h) {
   const head = `<section class="panel stack"><div class="row" style="justify-content:space-between"><div><span class="sub" style="font-size:14px">Mo-cap capture</span><h2 style="font-size:24px">${esc(fmtMD(cap.date))}${cap.label ? `, ${esc(cap.label)}` : ""}</h2></div>
       ${caps.length > 1 ? `<select id="capSel" data-k="${h.key}" aria-label="Capture" style="width:auto">${caps.map(c => `<option value="${esc(c.id)}" ${c.id === cap.id ? "selected" : ""}>${esc(fmtMD(c.date))} ${esc(c.label || "")}</option>`).join("")}</select>` : ""}</div>
     <p style="margin:0;font-size:17px">${esc(fb.summary || "")}</p>
-    ${cap.markerVideo ? `<video class="demo mech" controls playsinline muted loop preload="metadata" src="${esc(CORE.mediaUrl(cap.markerVideo))}" data-haslink="0" data-mech="1"></video>` : ""}
+    ${cap.markerVideo ? `<video class="demo mech" controls playsinline muted loop preload="none" src="${esc(CORE.mediaUrl(cap.markerVideo))}" data-haslink="0" data-mech="1"></video>` : ""}
     ${frames.length ? `<div class="skel">${frames.map(fr => `<figure>${skeletonSvg(cap, fr, knee)}<figcaption>${esc((MECH_EVENTS.find(e => e[0] === fr.event) || [0, fr.event])[1])}</figcaption></figure>`).join("")}</div>
     <div class="plotlegend"><span><i style="background:#3FBF74"></i>Front leg holding</span><span><i style="background:#F0566A"></i>Front leg giving</span><span><i style="background:#9CC3FF"></i>Throwing arm</span><span><i style="background:#E0A800"></i>Ball hand</span></div>` : ""}
   </section>`;
